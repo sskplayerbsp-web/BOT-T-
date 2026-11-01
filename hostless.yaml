@@ -1,0 +1,11 @@
+build:
+  command: "npm install --no-audit --no-fund"
+  system: auto
+
+start_command: "node index.js"
+
+scaling:
+  min_replicas: 1
+  max_replicas: 1
+
+# No health check needed for a worker
