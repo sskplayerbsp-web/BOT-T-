@@ -1,4 +1,4 @@
-console.log("🚀 STARTING BEDROCK AUTO-INVITE BOT (Resilient Version)...");
+console.log("🚀 STARTING BEDROCK AUTO-INVITE BOT (Auto-Accept Version)...");
 
 const bedrock = require('bedrock-protocol');
 const { Authflow, Titles } = require('prismarine-auth');
@@ -6,20 +6,16 @@ const fetch = require('node-fetch');
 const fs = require('fs');
 
 // ================= CONFIG =================
-const SERVER_HOST = 'sleepyempire.levyathan.ch';
-const SERVER_PORT = 19313;
-const BOT_EMAIL = 'shravan.sktn20@gmail.com';
+const SERVER_HOST = 'sleepyempire.levyathan.ch'; // Your Bedrock server IP
+const SERVER_PORT = 19313; // Your Bedrock server port
+const BOT_EMAIL = 'shravan.sktn20@gmail.com'; // The bot's Microsoft account email
 
-const CHECK_INTERVAL_MS = 30000;
-const SESSION_MINUTES = 120;
+const CHECK_INTERVAL_MS = 30000; // Check for new friends every 30 seconds
+const SESSION_MINUTES = 120; // Keep alive for 2 hours before cycling
 // ==========================================
 
 // ================= WRITABLE CACHE FIX =================
 const cacheDir = '/tmp/auth-cache';
-// Clear old cache to prevent auth errors
-if (fs.existsSync(cacheDir)) {
-    fs.rmSync(cacheDir, { recursive: true, force: true });
-}
 if (!fs.existsSync(cacheDir)) {
     fs.mkdirSync(cacheDir, { recursive: true });
 }
@@ -39,6 +35,7 @@ function createAuthflow(email) {
 // ================= FRIENDS & INVITE LOGIC =================
 const knownFriendXuids = new Set();
 
+// 1. Fetch the list of people who have added the bot
 async function fetchFollowers(authflow) {
     try {
         const token = await authflow.getXboxToken('http://xboxlive.com');
@@ -57,6 +54,7 @@ async function fetchFollowers(authflow) {
     }
 }
 
+// 2. Send a game invite to a specific XUID
 async function sendInvite(authflow, xuid, gamertag) {
     try {
         const token = await authflow.getXboxToken('https://multiplayer.minecraft.net/');
@@ -84,20 +82,75 @@ async function sendInvite(authflow, xuid, gamertag) {
     }
 }
 
+// 3. NEW: Check for and auto-accept friend requests
+async function acceptFriendRequests(authflow) {
+    try {
+        const token = await authflow.getXboxToken('http://xboxlive.com');
+        
+        // Fetch incoming friend requests
+        const res = await fetch('https://peoplehub.xboxlive.com/users/me/people/friendrequests(received)', {
+            headers: {
+                'Authorization': `XBL3.0 x=${token.userHash};${token.XSTSToken}`,
+                'x-xbl-contract-version': '2',
+                'Accept': 'application/json'
+            }
+        });
+        const data = await res.json();
+        const requests = data.people || [];
+
+        for (const request of requests) {
+            const xuid = request.xuid;
+            const gamertag = request.gamertag || request.displayName || 'Unknown';
+            
+            // Check if we've already processed this request
+            if (!knownFriendXuids.has(xuid)) {
+                console.log(`👋 New friend request from: ${gamertag} (XUID: ${xuid}). Accepting...`);
+                
+                // Accept the friend request
+                const acceptRes = await fetch(`https://social.xboxlive.com/users/me/people/xuid(${xuid})`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `XBL3.0 x=${token.userHash};${token.XSTSToken}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (acceptRes.ok) {
+                    console.log(`✅ Accepted friend request from ${gamertag}`);
+                    knownFriendXuids.add(xuid);
+                    // Wait a moment for Xbox to register the friendship, then invite
+                    await delay(2000, 3000);
+                    await sendInvite(authflow, xuid, gamertag);
+                } else {
+                    console.log(`❌ Failed to accept friend request from ${gamertag}. Status: ${acceptRes.status}`);
+                }
+            }
+        }
+    } catch (err) {
+        console.error('❌ Error checking friend requests:', err.message);
+    }
+}
+
+// 4. The loop that watches for new friends and invites them
 async function watchForNewFriends(authflow) {
     console.log('[Friends] Starting friend watcher loop...');
     
+    // Load existing followers on startup so we don't spam invites to old friends
     const initialFollowers = await fetchFollowers(authflow);
     initialFollowers.forEach(f => knownFriendXuids.add(f.xuid));
     console.log(`[Friends] Loaded ${knownFriendXuids.size} existing followers. Watching for new ones...`);
 
     while (true) {
         await delay(CHECK_INTERVAL_MS, CHECK_INTERVAL_MS + 5000);
+        
+        // Check for and auto-accept new friend requests
+        await acceptFriendRequests(authflow);
+        
+        // Also check followers list (for users who added bot as a friend directly)
         const currentFollowers = await fetchFollowers(authflow);
-
         for (const follower of currentFollowers) {
             if (!knownFriendXuids.has(follower.xuid)) {
-                console.log(`👋 New friend detected: ${follower.gamertag || follower.displayName}`);
+                console.log(`👋 New follower detected: ${follower.gamertag || follower.displayName}`);
                 knownFriendXuids.add(follower.xuid);
                 await sendInvite(authflow, follower.xuid, follower.gamertag || follower.displayName);
             }
@@ -109,9 +162,8 @@ async function watchForNewFriends(authflow) {
 function runBedrockBot(email, host, port) {
     return new Promise(async (resolve) => {
         let client = null;
-        // MODIFIED: Set reconnectAttempts very high
         let reconnectAttempts = 0;
-        const maxReconnectAttempts = 50; // Keep trying for hours
+        const maxReconnectAttempts = 50;
         let isIntentionallyDisconnected = false;
         
         const authflow = createAuthflow(email);
@@ -135,7 +187,7 @@ function runBedrockBot(email, host, port) {
 
                 client.on('join', async () => {
                     console.log(`${tag} ✅ spawned and joined the game.`);
-                    reconnectAttempts = 0; // Reset counter on successful join
+                    reconnectAttempts = 0;
                     
                     if (!client.friendWatcherStarted) {
                         client.friendWatcherStarted = true;
@@ -153,7 +205,6 @@ function runBedrockBot(email, host, port) {
 
                 client.on('error', (err) => console.error(`${tag} error:`, err.message));
                 
-                // MODIFIED: Log the kick reason clearly
                 client.on('kick', (reason) => {
                     console.log(`⚠️ ${tag} Kicked by server. Reason: ${JSON.stringify(reason)}`);
                 });
